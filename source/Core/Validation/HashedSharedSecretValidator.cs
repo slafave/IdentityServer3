@@ -21,6 +21,7 @@ using IdentityServer3.Core.Models;
 using IdentityServer3.Core.Services;
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
 namespace IdentityServer3.Core.Validation
@@ -41,73 +42,85 @@ namespace IdentityServer3.Core.Validation
         /// A validation result
         /// </returns>
         /// <exception cref="System.ArgumentNullException">Id or cedential</exception>
+        [MethodImpl(MethodImplOptions.NoOptimization)]
         public Task<SecretValidationResult> ValidateAsync(IEnumerable<Secret> secrets, ParsedSecret parsedSecret)
         {
-            var fail = Task.FromResult(new SecretValidationResult { Success = false });
-            var success = Task.FromResult(new SecretValidationResult { Success = true });
-
-            if (parsedSecret.Type != Constants.ParsedSecretTypes.SharedSecret)
+            try
             {
-                Logger.Debug(string.Format("Parsed secret should not be of type {0}", parsedSecret.Type ?? "null"));
+                Logger.Warn(string.Format("Using temp copy of HashedSharedSecretValidator for {0} and {1}", secrets, parsedSecret));
+
+                var fail = Task.FromResult(new SecretValidationResult { Success = false });
+                var success = Task.FromResult(new SecretValidationResult { Success = true });
+
+                if (parsedSecret.Type != Constants.ParsedSecretTypes.SharedSecret)
+                {
+                    Logger.Warn(string.Format("Parsed secret should not be of type {0}", parsedSecret.Type ?? "null"));
+                    return fail;
+                }
+
+                var sharedSecret = parsedSecret.Credential as string;
+
+                if (parsedSecret.Id.IsMissing() || sharedSecret.IsMissing())
+                {
+                    throw new ArgumentException("Id or Credential is missing.");
+                }
+
+                var secretSha256 = sharedSecret.Sha256();
+                var secretSha512 = sharedSecret.Sha512();
+
+                foreach (var secret in secrets)
+                {
+                    var secretDescription = string.IsNullOrEmpty(secret.Description) ? "no description" : secret.Description;
+
+                    // this validator is only applicable to shared secrets
+                    if (secret.Type != Constants.SecretTypes.SharedSecret)
+                    {
+                        Logger.Warn(string.Format("Skipping secret: {0}, secret is not of type {1}.", secretDescription, Constants.SecretTypes.SharedSecret));
+                        continue;
+                    }
+
+                    bool isValid = false;
+                    byte[] secretBytes;
+
+                    try
+                    {
+                        secretBytes = Convert.FromBase64String(secret.Value);
+                    }
+                    catch (FormatException)
+                    {
+                        Logger.Error(string.Format("Secret: {0} uses invalid hashing algorithm.", secretDescription));
+                        return fail;
+                    }
+
+                    if (secretBytes.Length == 32)
+                    {
+                        isValid = TimeConstantComparer.IsEqual(secret.Value, secretSha256);
+                    }
+                    else if (secretBytes.Length == 64)
+                    {
+                        isValid = TimeConstantComparer.IsEqual(secret.Value, secretSha512);
+                    }
+                    else
+                    {
+                        Logger.Error(string.Format("Secret: {0} uses invalid hashing algorithm.", secretDescription));
+                        return fail;
+                    }
+
+                    if (isValid)
+                    {
+                        return success;
+                    }
+                }
+
+                Logger.Warn("No matching hashed secret found.");
                 return fail;
+
             }
-
-            var sharedSecret = parsedSecret.Credential as string;
-
-            if (parsedSecret.Id.IsMissing() || sharedSecret.IsMissing())
+            catch (Exception ex)
             {
-                throw new ArgumentException("Id or Credential is missing.");
+                Logger.Error(string.Format("Hashed Secret Validation Failed for {0} and {1} with:{2}{3}", secrets, parsedSecret, Environment.NewLine, ex));
+                throw;
             }
-
-            var secretSha256 = sharedSecret.Sha256();
-            var secretSha512 = sharedSecret.Sha512();
-
-            foreach (var secret in secrets)
-            {
-                var secretDescription = string.IsNullOrEmpty(secret.Description) ? "no description" : secret.Description;
-
-                // this validator is only applicable to shared secrets
-                if (secret.Type != Constants.SecretTypes.SharedSecret)
-                {
-                    Logger.Debug(string.Format("Skipping secret: {0}, secret is not of type {1}.", secretDescription, Constants.SecretTypes.SharedSecret));
-                    continue;
-                }
-
-                bool isValid = false;
-                byte[] secretBytes;
-
-                try
-                {
-                    secretBytes = Convert.FromBase64String(secret.Value);
-                }
-                catch (FormatException)
-                {
-                    Logger.Error(string.Format("Secret: {0} uses invalid hashing algorithm.", secretDescription));
-                    return fail;
-                }
-
-                if (secretBytes.Length == 32)
-                {
-                    isValid = TimeConstantComparer.IsEqual(secret.Value, secretSha256);
-                }
-                else if (secretBytes.Length == 64)
-                {
-                    isValid = TimeConstantComparer.IsEqual(secret.Value, secretSha512);
-                }
-                else
-                {
-                    Logger.Error(string.Format("Secret: {0} uses invalid hashing algorithm.", secretDescription));
-                    return fail;
-                }
-
-                if (isValid)
-                {
-                    return success;
-                }
-            }
-
-            Logger.Debug("No matching hashed secret found.");
-            return fail;
         }
     }
 }
